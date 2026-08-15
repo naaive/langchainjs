@@ -1,0 +1,17 @@
+[package]
+name = "harness-core"
+description = "Core traits and types for the harness agent framework: messages, models, tools, errors."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
