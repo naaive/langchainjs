@@ -40,6 +40,8 @@ pub struct ApprovalRequest {
 #[derive(Debug, Clone)]
 pub enum Decision {
     Approve,
+    /// Approve, but run the tool with this input instead of the proposed one.
+    Edit(serde_json::Value),
     /// Deny with an optional reason the model will see as the tool result.
     Deny(Option<String>),
 }
@@ -62,6 +64,12 @@ pub struct RunResult {
 pub enum AgentError {
     #[error(transparent)]
     Model(#[from] ModelError),
+
+    #[error(transparent)]
+    Checkpoint(#[from] crate::checkpoint::CheckpointError),
+
+    #[error("agent misconfigured: {0}")]
+    Config(String),
 
     #[error("run exceeded max_turns ({0})")]
     MaxTurns(u32),

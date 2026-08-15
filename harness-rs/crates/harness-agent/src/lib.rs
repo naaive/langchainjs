@@ -18,11 +18,17 @@
 //! edge, `join!` is the parallel node.
 
 mod agent;
+mod agent_tool;
+mod checkpoint;
+mod compaction;
 mod event;
 mod middleware;
 mod run;
 
 pub use agent::{Agent, AgentBuilder, RetryPolicy};
+pub use agent_tool::AgentTool;
+pub use checkpoint::{CheckpointError, Checkpointer, FileCheckpointer, MemoryCheckpointer};
+pub use compaction::Compaction;
 pub use event::{AgentError, AgentEvent, ApprovalRequest, Decision, RunResult};
 pub use middleware::{Middleware, ToolCall, ToolNext};
 pub use run::AgentRun;

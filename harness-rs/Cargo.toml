@@ -4,6 +4,7 @@ members = [
     "crates/harness-core",
     "crates/harness-macros",
     "crates/harness-anthropic",
+    "crates/harness-openai",
     "crates/harness-agent",
     "examples/code-agent",
 ]

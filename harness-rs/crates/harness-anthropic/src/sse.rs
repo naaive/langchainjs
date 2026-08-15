@@ -142,3 +142,63 @@ impl Assembler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn assembles_text_and_tool_use_from_event_sequence() {
+        let mut asm = Assembler::default();
+        let events = vec![
+            json!({"type": "message_start", "message": {"usage": {"input_tokens": 25}}}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "I'll check"}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": " the weather."}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "tu_1", "name": "get_weather", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"city\":"}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "\"Tokyo\"}"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 12}}),
+            json!({"type": "message_stop"}),
+        ];
+
+        let mut text = String::new();
+        let mut completed = None;
+        for ev in events {
+            for out in asm.handle(ev).unwrap() {
+                match out {
+                    StreamEvent::TextDelta(t) => text.push_str(&t),
+                    StreamEvent::Completed(r) => completed = Some(r),
+                    _ => {}
+                }
+            }
+        }
+
+        assert_eq!(text, "I'll check the weather.");
+        let resp = completed.expect("message_stop must yield Completed");
+        assert_eq!(resp.stop_reason, harness_core::StopReason::ToolUse);
+        assert_eq!(resp.usage.input_tokens, 25);
+        assert_eq!(resp.usage.output_tokens, 12);
+        assert_eq!(resp.message.content.len(), 2);
+        match &resp.message.content[1] {
+            Content::ToolUse { id, name, input } => {
+                assert_eq!(id, "tu_1");
+                assert_eq!(name, "get_weather");
+                assert_eq!(input["city"], "Tokyo");
+            }
+            other => panic!("expected tool use, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_event_fails_the_stream() {
+        let mut asm = Assembler::default();
+        let err = asm
+            .handle(json!({"type": "error", "error": {"type": "overloaded_error"}}))
+            .unwrap_err();
+        assert!(matches!(err, ModelError::Api { .. }));
+    }
+}

@@ -12,10 +12,11 @@
 mod tools;
 
 use std::io::Write as _;
+use std::sync::Arc;
 
-use harness_agent::{Agent, AgentEvent, Decision};
+use harness_agent::{Agent, AgentEvent, Checkpointer, Decision, FileCheckpointer};
 use harness_anthropic::Anthropic;
-use harness_core::{tools, Message, ToolContext};
+use harness_core::{tools, ToolContext};
 
 const DIM: &str = "\x1b[2m";
 const BOLD: &str = "\x1b[1m";
@@ -49,8 +50,13 @@ async fn main() {
         std::process::exit(1);
     }
     let model_id = std::env::var("HARNESS_MODEL").unwrap_or_else(|_| "claude-sonnet-5".to_string());
+    let session = std::env::var("HARNESS_SESSION").unwrap_or_else(|_| "default".to_string());
     let ctx = ToolContext::default();
     let cwd = ctx.cwd.display().to_string();
+
+    // Conversations are durable: every turn is checkpointed to disk, so
+    // restarting the binary resumes the session where it left off.
+    let store = Arc::new(FileCheckpointer::new(ctx.cwd.join(".harness/sessions")));
 
     let agent = Agent::builder()
         .model(Anthropic::new(&model_id))
@@ -62,14 +68,14 @@ async fn main() {
             tools::list_dir,
             tools::bash,
         ])
+        .checkpointer(store.clone())
         .tool_context(ctx)
         .max_turns(100)
         .build();
 
-    println!("{BOLD}code-agent{RESET} {DIM}· {model_id} · {cwd}{RESET}");
+    println!("{BOLD}code-agent{RESET} {DIM}· {model_id} · session {session} · {cwd}{RESET}");
     println!("{DIM}Describe a task. \"exit\" quits, \"/clear\" resets the conversation.{RESET}\n");
 
-    let mut history: Vec<Message> = Vec::new();
     loop {
         let Some(line) = prompt(&format!("{CYAN}❯{RESET} ")).await else {
             break;
@@ -79,29 +85,30 @@ async fn main() {
             "" => continue,
             "exit" | "quit" => break,
             "/clear" => {
-                history.clear();
-                println!("{DIM}conversation cleared{RESET}");
+                match store.delete(&session).await {
+                    Ok(()) => println!("{DIM}conversation cleared{RESET}"),
+                    Err(e) => eprintln!("{YELLOW}error:{RESET} {e}"),
+                }
                 continue;
             }
             _ => {}
         }
 
-        match converse(&agent, std::mem::take(&mut history), &input).await {
-            Ok(messages) => history = messages,
-            Err(e) => eprintln!("\n{YELLOW}error:{RESET} {e}"),
+        if let Err(e) = converse(&agent, &session, &input).await {
+            eprintln!("\n{YELLOW}error:{RESET} {e}");
         }
         println!();
     }
 }
 
-/// Run one user turn to completion, rendering events as they stream.
-/// Returns the updated conversation history.
+/// Run one user turn to completion, rendering events as they stream. History
+/// travels through the checkpointer, keyed by the session id.
 async fn converse(
     agent: &Agent,
-    history: Vec<Message>,
+    session: &str,
     input: &str,
-) -> Result<Vec<Message>, harness_agent::AgentError> {
-    let mut run = agent.run(history, input);
+) -> Result<(), harness_agent::AgentError> {
+    let mut run = agent.run_session(session, input);
     let mut result = None;
     while let Some(event) = run.next_event().await {
         match event? {
@@ -137,7 +144,7 @@ async fn converse(
                     "\n{DIM}· {} turns · {} in / {} out tokens{RESET}",
                     r.turns, r.usage.input_tokens, r.usage.output_tokens
                 );
-                result = Some(r.messages);
+                result = Some(());
             }
         }
     }

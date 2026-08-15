@@ -19,10 +19,14 @@ What remains in the framework is only what a language can't give you:
 
 ```
 crates/
-  harness-core        Pure traits & types: Message, Content, ChatModel, Tool. Zero heavy deps.
+  harness-core        Pure traits & types: Message, Content, ChatModel, Tool,
+                      structured output. Zero heavy deps.
   harness-macros      #[tool] proc macro: schema + Tool impl derived from an async fn.
   harness-anthropic   Anthropic Messages API provider (SSE streaming, tool use).
-  harness-agent       Agent runtime: loop, AgentEvent stream, approvals, middleware, retry.
+  harness-openai      OpenAI-compatible Chat Completions provider
+                      (OpenAI, Ollama, vLLM, llama.cpp, gateways).
+  harness-agent       Agent runtime: loop, AgentEvent stream, approvals, middleware,
+                      retry, checkpointing, context compaction.
 examples/
   code-agent          A Claude Code-style terminal coding agent (the flagship example).
 ```
@@ -77,7 +81,44 @@ while let Some(event) = run.next_event().await {
 
 One API serves both "just give me the answer" (`run.wait().await`) and "render
 every token" (iterate the stream). Events are an exhaustive enum — no string
-event names, no untyped payload dicts.
+event names, no untyped payload dicts. Approval decisions are `Approve`,
+`Deny(reason)` — which the model sees as an error result and reacts to — or
+`Edit(new_input)` to run the tool with corrected arguments.
+
+Durable sessions need one extra line:
+
+```rust
+let agent = Agent::builder()
+    .model(model)
+    .checkpointer(FileCheckpointer::new(".sessions"))   // or MemoryCheckpointer, or your own
+    .build();
+
+agent.run_session("ticket-4711", "continue the migration");
+```
+
+`run_session` loads history from the store, and every append (assistant
+message, tool results) is persisted before the run proceeds — a crash loses at
+most the model call in flight, never completed tool work. Because a checkpoint
+is just the serialized message history, any storage that can hold bytes can be
+a `Checkpointer` (three methods).
+
+Typed structured output works on any model, with schema-repair retries built
+in:
+
+```rust
+#[derive(Deserialize, JsonSchema)]
+struct Invoice { customer: String, total_cents: u64 }
+
+let invoice: Invoice = model.generate_as(req).await?;
+```
+
+When history outgrows the context window, the `Compaction` middleware
+summarizes the old prefix with a (possibly cheaper) model and caches the
+summary; the agent's canonical history is never mutated:
+
+```rust
+.middleware(Compaction::new(Anthropic::new("claude-haiku-4-5"), 150_000))
+```
 
 ## The flagship example: a Claude Code-style agent
 
@@ -89,8 +130,11 @@ cargo run -p code-agent
 An interactive terminal coding agent with `read_file` / `write_file` /
 `edit_file` / `list_dir` / `bash`. It streams its reasoning, shows each tool
 call as it executes, and pauses for `y/N` approval before running any shell
-command — the runtime's `AwaitingApproval` state driving a real UI. The whole
-thing is ~350 lines, most of which is terminal rendering.
+command — the runtime's `AwaitingApproval` state driving a real UI.
+Conversations are checkpointed to `.harness/sessions/`, so quitting and
+restarting the binary resumes where you left off (`HARNESS_SESSION` selects
+the session, `/clear` wipes it). The whole thing is ~400 lines, most of which
+is terminal rendering.
 
 ## Architectural positions (vs. LangChain / LangGraph)
 
@@ -118,17 +162,32 @@ of crashing.
 
 ## Status & roadmap
 
-Working today: core traits, `#[tool]` macro (schemas, optional params, context
-injection, approval flag), Anthropic provider with SSE streaming and
-incremental tool-input assembly, agent loop with retry/backoff, middleware
-hooks (`before_model_call`, onion-style `on_tool_call`), approval flow, and
-the code-agent example. `cargo test` covers the loop against a scripted mock
-model.
+Working today:
+
+- core traits; `#[tool]` macro (compile-time schemas, optional params, context
+  injection, approval flag)
+- providers: Anthropic (Messages API) and OpenAI-compatible (Chat Completions —
+  OpenAI, Ollama, vLLM, ...), both with SSE streaming and incremental
+  tool-input assembly
+- agent loop: typed event stream, retry with backoff (only before anything
+  streamed, so UIs never see duplicate output), concurrent execution of
+  independent tool calls with results in model order, tool errors as data
+- human-in-the-loop: `AwaitingApproval` state with approve / deny / edit
+- durable sessions: `Checkpointer` trait with in-memory and atomic-file
+  backends, checkpoint-per-append via `run_session`
+- typed structured output with bounded schema-repair retries
+- middleware (`before_model_call`, onion-style `on_tool_call`) and the
+  `Compaction` history-summarization middleware
+- `tracing` spans on model and tool calls with OpenTelemetry GenAI-style
+  attributes (`gen_ai.operation.name`, `gen_ai.request.model`, `gen_ai.tool.name`)
+
+`cargo test` covers the loop, approvals (deny and edit), persistence,
+compaction, concurrency, structured-output repair, and both providers' wire
+mapping and stream assembly against scripted mocks and fixtures.
 
 Planned next:
 
-- typed structured output (`generate_as::<T>()` via schemars + retry-on-parse-failure)
-- checkpointer backends (sqlite/postgres) over the already-serializable history
-- more providers (OpenAI, Gemini, Ollama) — the trait is one method
-- context-compaction middleware (summarize when the window fills)
-- `tracing` spans following the OpenTelemetry GenAI semantic conventions
+- extended-thinking round-trip (signatures) for Anthropic
+- SQL checkpointer backends over the same three-method trait
+- token-count-based compaction thresholds fed from provider usage data
+- cancellation tokens surfaced through `ToolContext`

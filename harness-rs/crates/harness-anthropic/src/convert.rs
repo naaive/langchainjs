@@ -1,6 +1,8 @@
 //! Mapping between harness types and the Messages API wire format.
 
-use harness_core::{Content, Message, ModelError, Request, Response, Role, StopReason, Usage};
+use harness_core::{
+    Content, Message, ModelError, Request, Response, Role, StopReason, ToolChoice, Usage,
+};
 use serde_json::{json, Value};
 
 pub fn to_body(req: &Request, model: &str, default_max_tokens: u32, stream: bool) -> Value {
@@ -16,6 +18,19 @@ pub fn to_body(req: &Request, model: &str, default_max_tokens: u32, stream: bool
     }
     if let Some(temp) = req.temperature {
         body["temperature"] = json!(temp);
+    }
+    if let Some(top_p) = req.top_p {
+        body["top_p"] = json!(top_p);
+    }
+    if !req.stop_sequences.is_empty() {
+        body["stop_sequences"] = json!(req.stop_sequences);
+    }
+    if let Some(choice) = &req.tool_choice {
+        body["tool_choice"] = match choice {
+            ToolChoice::Auto => json!({"type": "auto"}),
+            ToolChoice::Any => json!({"type": "any"}),
+            ToolChoice::Tool(name) => json!({"type": "tool", "name": name}),
+        };
     }
     if !req.tools.is_empty() {
         body["tools"] = req
@@ -114,4 +129,57 @@ pub fn parse_response(value: &Value) -> Result<Response, ModelError> {
         stop_reason: parse_stop_reason(value["stop_reason"].as_str()),
         usage: parse_usage(&value["usage"]),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harness_core::ToolSpec;
+
+    #[test]
+    fn builds_full_request_body() {
+        let req = Request {
+            system: Some("be brief".into()),
+            messages: vec![
+                Message::user("hi"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolUse {
+                        id: "t1".into(),
+                        name: "f".into(),
+                        input: serde_json::json!({"a": 1}),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![Content::ToolResult {
+                        tool_use_id: "t1".into(),
+                        content: "42".into(),
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![ToolSpec {
+                name: "f".into(),
+                description: "d".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            tool_choice: Some(ToolChoice::Tool("f".into())),
+            max_tokens: 0,
+            temperature: Some(0.2),
+            top_p: None,
+            stop_sequences: vec!["END".into()],
+        };
+        let body = to_body(&req, "test-model", 8192, false);
+
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["max_tokens"], 8192, "0 falls back to default");
+        assert_eq!(body["system"], "be brief");
+        assert_eq!(body["stop_sequences"][0], "END");
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "f");
+        assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+        assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], "t1");
+        assert_eq!(body["tools"][0]["name"], "f");
+    }
 }

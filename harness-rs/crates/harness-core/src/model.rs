@@ -14,6 +14,17 @@ pub struct ToolSpec {
     pub input_schema: serde_json::Value,
 }
 
+/// How the model is allowed to use the advertised tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolChoice {
+    /// Model decides freely (the default when unset).
+    Auto,
+    /// Model must call some tool.
+    Any,
+    /// Model must call this specific tool.
+    Tool(String),
+}
+
 /// One model invocation. There is no session state hidden in the provider —
 /// the full conversation travels in `messages` every call, which is what
 /// makes runs resumable and providers stateless.
@@ -22,9 +33,12 @@ pub struct Request {
     pub system: Option<String>,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolSpec>,
+    pub tool_choice: Option<ToolChoice>,
     /// Upper bound on generated tokens. Providers apply their own default if 0.
     pub max_tokens: u32,
     pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub stop_sequences: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +104,11 @@ pub trait ChatModel: Send + Sync {
     /// Stream a response. The stream must yield `Completed` as its final
     /// event on success.
     fn stream(&self, req: Request) -> ModelStream<'_>;
+
+    /// The provider's model identifier (for telemetry). Empty if unknown.
+    fn model_id(&self) -> &str {
+        ""
+    }
 
     async fn generate(&self, req: Request) -> Result<Response, ModelError> {
         let mut stream = self.stream(req);

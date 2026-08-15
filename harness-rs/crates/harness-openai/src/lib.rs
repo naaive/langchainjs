@@ -1,41 +1,42 @@
-//! Anthropic Messages API provider for harness.
+//! OpenAI-compatible Chat Completions provider for harness.
 //!
-//! Implements [`ChatModel`] over the Messages API, including SSE streaming
-//! with incremental tool-input assembly. The provider is stateless: every
-//! request carries the full conversation.
+//! Speaks the `/chat/completions` dialect, which makes it the adapter for
+//! OpenAI itself and for the many servers that implement the same API —
+//! Ollama, vLLM, llama.cpp, LM Studio, most gateways:
+//!
+//! ```ignore
+//! let openai = OpenAi::new("gpt-4o");                       // OPENAI_API_KEY
+//! let local  = OpenAi::new("llama3.2")
+//!     .with_base_url("http://localhost:11434/v1")           // Ollama
+//!     .with_api_key("ollama");
+//! ```
 
-mod convert;
+pub mod convert;
 mod sse;
 
 use async_stream::try_stream;
 use futures::StreamExt;
 use harness_core::{ChatModel, ModelError, ModelStream, Request, Response};
 
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
-const API_VERSION: &str = "2023-06-01";
-const DEFAULT_MAX_TOKENS: u32 = 8192;
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
-/// Anthropic Messages API client.
-///
-/// ```ignore
-/// let model = Anthropic::new("claude-sonnet-5"); // reads ANTHROPIC_API_KEY
-/// ```
+/// Chat Completions API client (OpenAI or any compatible server).
 #[derive(Clone)]
-pub struct Anthropic {
+pub struct OpenAi {
     client: reqwest::Client,
     api_key: String,
     model: String,
     base_url: String,
 }
 
-impl Anthropic {
-    /// Create a client for `model`, reading the key from `ANTHROPIC_API_KEY`.
+impl OpenAi {
+    /// Create a client for `model`, reading the key from `OPENAI_API_KEY`.
     pub fn new(model: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
             model: model.into(),
-            base_url: std::env::var("ANTHROPIC_BASE_URL")
+            base_url: std::env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| DEFAULT_BASE_URL.to_string()),
         }
     }
@@ -45,21 +46,18 @@ impl Anthropic {
         self
     }
 
+    /// Point at a compatible server, e.g. `http://localhost:11434/v1` for
+    /// Ollama. The path must include the API prefix (usually `/v1`).
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
+        self.base_url = url.into().trim_end_matches('/').to_string();
         self
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
-    }
-
     fn request(&self, req: &Request, stream: bool) -> reqwest::RequestBuilder {
-        let body = convert::to_body(req, &self.model, DEFAULT_MAX_TOKENS, stream);
+        let body = convert::to_body(req, &self.model, stream);
         self.client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(&self.api_key)
             .json(&body)
     }
 }
@@ -77,7 +75,7 @@ async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, Mode
 }
 
 #[harness_core::async_trait]
-impl ChatModel for Anthropic {
+impl ChatModel for OpenAi {
     fn model_id(&self) -> &str {
         &self.model
     }
@@ -92,11 +90,17 @@ impl ChatModel for Anthropic {
             let resp = check_status(resp).await?;
 
             let mut events = std::pin::pin!(sse::events(resp.bytes_stream()));
-            let mut assembler = sse::Assembler::default();
-            while let Some(event) = events.next().await {
-                for out in assembler.handle(event?)? {
+            let mut assembler = convert::ChunkAssembler::default();
+            while let Some(chunk) = events.next().await {
+                for out in assembler.handle(&chunk?)? {
                     yield out;
                 }
+            }
+            // Compatible servers end with `data: [DONE]`; the assembled
+            // response is emitted when the sentinel (or the stream end)
+            // is reached.
+            if let Some(out) = assembler.finish() {
+                yield out;
             }
         })
     }

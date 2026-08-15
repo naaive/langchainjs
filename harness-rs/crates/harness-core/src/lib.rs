@@ -10,13 +10,15 @@
 mod error;
 mod message;
 mod model;
+mod structured;
 mod tool;
 
 pub use error::{ModelError, ToolError};
 pub use message::{Content, Message, Role};
 pub use model::{
-    ChatModel, ModelStream, Request, Response, StopReason, StreamEvent, ToolSpec, Usage,
+    ChatModel, ModelStream, Request, Response, StopReason, StreamEvent, ToolChoice, ToolSpec, Usage,
 };
+pub use structured::{GenerateStructured, STRUCTURED_OUTPUT_TOOL};
 pub use tool::{IntoToolOutput, Tool, ToolContext, ToolOutput};
 
 pub use async_trait::async_trait;
